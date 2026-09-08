@@ -62,8 +62,8 @@ if (!passwordHash && existingUserPassword && existingUserPassword !== internalPa
   setValue(SECURE_PASSWORD_HASH_KEY, passwordHash)
 }
 
-// Keep the original backend private. Its legacy plaintext password is replaced by a random
-// loopback-only credential, while the user's real password is stored only as a scrypt hash.
+// The original backend is loopback-only. Its legacy plaintext credential is replaced by a
+// random internal secret; the user's actual password is retained only as a scrypt hash.
 setValue(ACCESS_PASSWORD_KEY, internalPassword)
 setValue(ACCESS_PASSWORD_ENABLED_KEY, 'true')
 
@@ -110,8 +110,8 @@ const clearSessionCookie = (req, res) => res.clearCookie(SESSION_COOKIE_NAME, {
 })
 const clientKey = (req) => String(req.socket.remoteAddress || req.ip || 'unknown')
 
-// Start the upstream backend on loopback only. This keeps the security boundary small and
-// allows future upstream merges without continuously editing the large index.mjs file.
+// Start the upstream backend on loopback only. This preserves upstream compatibility while
+// keeping the root-capable backend outside the LAN/WAN attack surface.
 process.env.HOST = '127.0.0.1'
 process.env.PORT = String(backendPort)
 const backend = await import('./index.mjs')
@@ -137,6 +137,14 @@ const server = http.createServer(app)
 const websocketServer = new WebSocketServer({ noServer: true })
 app.set('case sensitive routing', true)
 app.disable('x-powered-by')
+
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('X-Frame-Options', 'DENY')
+  res.setHeader('Referrer-Policy', 'no-referrer')
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin')
+  next()
+})
 app.use('/api/auth', express.json({ limit: '4kb' }))
 
 app.get('/api/health', (_req, res) => {
@@ -146,7 +154,11 @@ app.get('/api/health', (_req, res) => {
 
 app.get('/api/auth/status', (req, res) => {
   res.setHeader('Cache-Control', 'no-store')
-  res.json({ enabled: Boolean(passwordHash), authenticated: Boolean(passwordHash) && isAuthenticated(req), passwordSet: Boolean(passwordHash) })
+  res.json({
+    enabled: Boolean(passwordHash),
+    authenticated: Boolean(passwordHash) && isAuthenticated(req),
+    passwordSet: Boolean(passwordHash),
+  })
 })
 
 app.post('/api/auth/setup', (req, res) => {
@@ -154,7 +166,10 @@ app.post('/api/auth/setup', (req, res) => {
   if (passwordHash) return res.status(409).json({ error: 'PASSWORD_ALREADY_SET' })
   const password = typeof req.body?.password === 'string' ? req.body.password : ''
   if (password.length < MIN_PASSWORD_LENGTH) {
-    return res.status(400).json({ error: 'PASSWORD_TOO_SHORT', message: `Password must be at least ${MIN_PASSWORD_LENGTH} characters` })
+    return res.status(400).json({
+      error: 'PASSWORD_TOO_SHORT',
+      message: `Password must be at least ${MIN_PASSWORD_LENGTH} characters`,
+    })
   }
   passwordHash = hashPassword(password)
   setValue(SECURE_PASSWORD_HASH_KEY, passwordHash)
@@ -177,7 +192,12 @@ app.post('/api/auth/login', (req, res) => {
   if (!verifyPassword(password, passwordHash)) {
     LOGIN_LIMITER.recordFailure(key)
     clearSessionCookie(req, res)
-    return res.status(401).json({ code: 'ACCESS_PASSWORD_INVALID', message: 'Invalid access password', enabled: true, authenticated: false })
+    return res.status(401).json({
+      code: 'ACCESS_PASSWORD_INVALID',
+      message: 'Invalid access password',
+      enabled: true,
+      authenticated: false,
+    })
   }
 
   LOGIN_LIMITER.recordSuccess(key)
@@ -194,11 +214,29 @@ app.post('/api/auth/logout', (req, res) => {
 app.post('/api/auth/change-password', (req, res) => {
   res.setHeader('Cache-Control', 'no-store')
   if (!passwordHash) return res.status(409).json({ error: 'PASSWORD_SETUP_REQUIRED' })
+  if (!isAuthenticated(req)) {
+    return res.status(401).json({
+      code: 'ACCESS_PASSWORD_REQUIRED',
+      message: 'Authenticated session required',
+    })
+  }
+
+  const key = clientKey(req)
+  const lockedFor = LOGIN_LIMITER.isLocked(key)
+  if (lockedFor > 0) {
+    res.setHeader('Retry-After', String(Math.ceil(lockedFor / 1000)))
+    return res.status(429).json({ code: 'ACCESS_RATE_LIMITED', message: 'Too many failed password attempts' })
+  }
+
   const currentPassword = typeof req.body?.currentPassword === 'string' ? req.body.currentPassword : ''
   const newPassword = typeof req.body?.newPassword === 'string' ? req.body.newPassword : ''
-  if (!verifyPassword(currentPassword, passwordHash)) return res.status(401).json({ code: 'ACCESS_PASSWORD_INVALID' })
+  if (!verifyPassword(currentPassword, passwordHash)) {
+    LOGIN_LIMITER.recordFailure(key)
+    return res.status(401).json({ code: 'ACCESS_PASSWORD_INVALID' })
+  }
   if (newPassword.length < MIN_PASSWORD_LENGTH) return res.status(400).json({ error: 'PASSWORD_TOO_SHORT' })
 
+  LOGIN_LIMITER.recordSuccess(key)
   passwordHash = hashPassword(newPassword)
   setValue(SECURE_PASSWORD_HASH_KEY, passwordHash)
   setSessionCookie(req, res)
@@ -209,23 +247,61 @@ app.use((req, res, next) => {
   const normalizedPath = req.path.toLowerCase().replace(/\/{2,}/g, '/')
   if (!normalizedPath.startsWith('/api/')) return next()
   if (!passwordHash) return res.status(403).json({ error: 'PASSWORD_SETUP_REQUIRED' })
-  if (!isAuthenticated(req)) return res.status(401).json({ code: 'ACCESS_PASSWORD_REQUIRED', message: 'Access password authentication required' })
+  if (!isAuthenticated(req)) {
+    return res.status(401).json({
+      code: 'ACCESS_PASSWORD_REQUIRED',
+      message: 'Access password authentication required',
+    })
+  }
 
   if (normalizedPath.startsWith('/api/controller')) {
-    if (req.headers['x-zashboard-target-base'] || req.headers['x-zashboard-target-secret']) {
+    const requestUrl = new URL(req.originalUrl || '/', `http://${req.headers.host || 'localhost'}`)
+    if (
+      req.headers['x-zashboard-target-base'] ||
+      req.headers['x-zashboard-target-secret'] ||
+      requestUrl.searchParams.has('targetBase') ||
+      requestUrl.searchParams.has('secret')
+    ) {
       return res.status(400).json({ error: 'CUSTOM_CONTROLLER_TARGET_DISABLED' })
     }
   }
   next()
 })
 
-const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'host'])
-app.use((req, res) => {
-  const headers = { ...req.headers, cookie: backendCookie, host: `127.0.0.1:${backendPort}` }
-  delete headers['x-zashboard-target-base']
-  delete headers['x-zashboard-target-secret']
+const HOP_BY_HOP = new Set([
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+  'host',
+])
 
-  const upstream = http.request({ hostname: '127.0.0.1', port: backendPort, path: req.originalUrl, method: req.method, headers }, (upstreamRes) => {
+app.use((req, res) => {
+  const headers = {}
+  for (const [key, value] of Object.entries(req.headers)) {
+    const normalized = key.toLowerCase()
+    if (
+      HOP_BY_HOP.has(normalized) ||
+      normalized === 'cookie' ||
+      normalized.startsWith('x-zashboard-target-') ||
+      value === undefined
+    ) continue
+    headers[key] = value
+  }
+  headers.cookie = backendCookie
+  headers.host = `127.0.0.1:${backendPort}`
+
+  const upstream = http.request({
+    hostname: '127.0.0.1',
+    port: backendPort,
+    path: req.originalUrl,
+    method: req.method,
+    headers,
+  }, (upstreamRes) => {
     res.statusCode = upstreamRes.statusCode || 502
     for (const [key, value] of Object.entries(upstreamRes.headers)) {
       const normalized = key.toLowerCase()
@@ -244,11 +320,13 @@ app.use((req, res) => {
 const closeWebSocket = (socket, code = 1008, reason = 'Unauthorized') => {
   try { socket.close(code, reason) } catch {}
 }
+const isControllerWebSocketPath = (pathname) =>
+  pathname === '/api/controller-ws' || pathname.startsWith('/api/controller-ws/')
 
 server.on('upgrade', (request, socket, head) => {
   try {
     const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`)
-    if (!url.pathname.startsWith('/api/controller-ws')) return socket.destroy()
+    if (!isControllerWebSocketPath(url.pathname)) return socket.destroy()
     if (!passwordHash || !isAuthenticated(request)) {
       socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
       return socket.destroy()
@@ -267,10 +345,16 @@ websocketServer.on('connection', (clientSocket, request) => {
   const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`)
   url.searchParams.delete('targetBase')
   url.searchParams.delete('secret')
-  const upstream = new WebSocket(`ws://127.0.0.1:${backendPort}${url.pathname}${url.search}`, { headers: { Cookie: backendCookie } })
+  const upstream = new WebSocket(`ws://127.0.0.1:${backendPort}${url.pathname}${url.search}`, {
+    headers: { Cookie: backendCookie },
+  })
 
-  clientSocket.on('message', (data, binary) => { if (upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary }) })
-  upstream.on('message', (data, binary) => { if (clientSocket.readyState === WebSocket.OPEN) clientSocket.send(data, { binary }) })
+  clientSocket.on('message', (data, binary) => {
+    if (upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary })
+  })
+  upstream.on('message', (data, binary) => {
+    if (clientSocket.readyState === WebSocket.OPEN) clientSocket.send(data, { binary })
+  })
   clientSocket.on('close', () => closeWebSocket(upstream, 1000, 'Client closed'))
   upstream.on('close', () => closeWebSocket(clientSocket, 1000, 'Upstream closed'))
   clientSocket.on('error', () => closeWebSocket(upstream))
