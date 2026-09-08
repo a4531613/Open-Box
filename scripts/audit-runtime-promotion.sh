@@ -15,16 +15,41 @@ forbidden_source() {
   fi
 }
 
+# High-confidence upstream dashboard promotion/self-update code: block anywhere in runtime source.
 forbidden_source 'AnGe-ClashBoard|basedOnZashboard|fetchIsUIUpdateAvailable|upgradeUIAPI' \
   'upstream dashboard branding or self-update channel'
-forbidden_source 't\.me/|telegram\.me/|discord\.gg/|buymeacoffee|ko-fi|patreon|sponsor|donat(e|ion)|赞助|捐赠|广告' \
-  'advertising, donation, sponsor or community promotion link/text'
 
-# The hardened runtime may display dependency names/versions, but settings components must not
-# turn those names into promotional GitHub links.
+# Community/donation destinations are promotional regardless of whether they appear in a template
+# or a helper. Do not match the generic Chinese word "广告" here: subscription code legitimately
+# contains comments and filters for removing airport announcement/ad nodes.
+forbidden_source 't\.me/|telegram\.me/|discord\.gg/|buymeacoffee|ko-fi|patreon' \
+  'community or donation promotion link'
+
+# Human-visible advertising/donation copy belongs in Vue UI. Restrict the generic wording check to
+# templates/components so anti-ad implementation comments do not become false positives.
+if grep -R -n -E '赞助|捐赠|广告|sponsor|donat(e|ion)' panel/src \
+  --include='*.vue' 2>/dev/null; then
+  echo '[promotion-audit] forbidden advertising/donation text in runtime UI' >&2
+  fail=1
+fi
+
+# Localized donation/sponsor copy is also visible even though locale resources are TypeScript.
+# Keep this high confidence and intentionally do not match the generic word "广告".
+if grep -R -n -E '赞助|捐赠|sponsor|donat(e|ion)|buymeacoffee|ko-fi|patreon' panel/src/i18n 2>/dev/null; then
+  echo '[promotion-audit] forbidden advertising/donation copy in locale resources' >&2
+  fail=1
+fi
+
+# The hardened runtime may display dependency names/versions, but components/views must not turn
+# those names into promotional repository links or branded dashboard references.
 if grep -R -n -E 'github\.com/(sagernet/sing-box|metacubex/mihomo|liandu2024/AnGe-ClashBoard)' \
   panel/src/components panel/src/views 2>/dev/null; then
   echo '[promotion-audit] forbidden promotional repository link in runtime UI' >&2
+  fail=1
+fi
+
+if grep -R -n -E 'metacubex\.jpg|sing-box\.svg' panel/src/components panel/src/views 2>/dev/null; then
+  echo '[promotion-audit] forbidden third-party brand logo in runtime UI' >&2
   fail=1
 fi
 
