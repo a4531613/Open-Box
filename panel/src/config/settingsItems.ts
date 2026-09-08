@@ -40,14 +40,6 @@ export const SETTINGS_CATEGORIES: SettingsCategory[] = [
         label: 'theme',
       },
       {
-        key: `${SETTINGS_MENU_KEY.general}.zashboardSettings.autoUpgrade`,
-        label: 'autoUpgrade',
-      },
-      {
-        key: `${SETTINGS_MENU_KEY.general}.zashboardSettings.upgradeUI`,
-        label: 'upgradeUI',
-      },
-      {
         key: `${SETTINGS_MENU_KEY.general}.zashboardSettings.exportSettings`,
         label: 'exportSettings',
       },
