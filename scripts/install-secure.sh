@@ -126,6 +126,15 @@ tar -tzf "$TMP_DL/$ASSET" | grep -qx 'panel/server/security-gateway.mjs' || \
 tar -tzf "$TMP_DL/$ASSET" | grep -qx 'openwrt/initd/openbox-panel' || \
   die "release is missing hardened OpenWrt service files"
 
+# The artifact must also prove that future updates and LuCI version checks remain on this fork.
+# This catches a broken release pipeline before anything is written to /opt.
+tar -xOzf "$TMP_DL/$ASSET" update.sh 2>/dev/null | \
+  grep -q 'REPO="a4531613/Open-Box"' || \
+  die "release updater does not point to the hardened fork"
+tar -xOzf "$TMP_DL/$ASSET" openwrt/luci/htdocs/luci-static/resources/view/openbox/status.js 2>/dev/null | \
+  grep -q "var REPO = 'a4531613/Open-Box';" || \
+  die "LuCI update checker does not point to the hardened fork"
+
 meta=$(tar -xOzf "$TMP_DL/$ASSET" meta.json 2>/dev/null || true)
 version=$(printf '%s\n' "$meta" | sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p' | head -n 1)
 case "$version" in
