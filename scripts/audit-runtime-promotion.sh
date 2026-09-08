@@ -53,6 +53,13 @@ if grep -R -n -E 'metacubex\.jpg|sing-box\.svg' panel/src/components panel/src/v
   fail=1
 fi
 
+# Overview is the landing page. Keep its top control bar product-neutral: no backend branding,
+# external links, or version badge may be reintroduced above the actual dashboard content.
+if grep -n -E 'BackendVersion|href=|https?://' panel/src/components/sidebar/OverviewCtrl.vue 2>/dev/null; then
+  echo '[promotion-audit] forbidden branding or external link in overview top bar' >&2
+  fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo '[promotion-audit] FAILED' >&2
   exit 1
