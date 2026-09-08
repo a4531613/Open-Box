@@ -1,0 +1,142 @@
+name: Security Release
+
+on:
+  push:
+    tags:
+      - 'secure-v*'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: corepack enable
+      - name: Install dependencies
+        working-directory: panel
+        run: corepack pnpm install --frozen-lockfile
+      - name: Server tests
+        working-directory: panel
+        run: corepack pnpm run test:server
+      - name: Validate generated config
+        working-directory: panel
+        run: corepack pnpm run check:config
+      - name: Build panel
+        working-directory: panel
+        run: corepack pnpm run build
+      - name: Hardened installer syntax
+        run: sh -n scripts/install-secure.sh
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: corepack enable
+      - name: Install dependencies
+        working-directory: panel
+        run: corepack pnpm install --frozen-lockfile
+
+      # The upstream scripts are intentionally kept close to upstream for easier syncing.
+      # Release artifacts, however, must never update back to liandu2024/Open-Box.
+      - name: Bind release artifact to hardened fork
+        run: |
+          set -eu
+          sed -i 's#REPO="liandu2024/Open-Box"#REPO="a4531613/Open-Box"#' scripts/update.sh scripts/install.sh
+          sed -i "s#var REPO = 'liandu2024/Open-Box';#var REPO = 'a4531613/Open-Box';#" openwrt/luci/htdocs/luci-static/resources/view/openbox/status.js
+          grep -q 'REPO="a4531613/Open-Box"' scripts/update.sh
+          grep -q "var REPO = 'a4531613/Open-Box';" openwrt/luci/htdocs/luci-static/resources/view/openbox/status.js
+
+      - name: Build release tarball
+        env:
+          OPENBOX_VERSION: ${{ github.ref_name }}
+        run: bash scripts/build-release.sh ${{ matrix.arch }} dist-release
+
+      - name: Verify hardened artifact contents
+        run: |
+          set -eu
+          asset="dist-release/open-box-linux-${{ matrix.arch }}.tar.gz"
+          tar -tzf "$asset" | grep -qx 'panel/server/security-gateway.mjs'
+          tar -tzf "$asset" | grep -qx 'openwrt/initd/openbox-panel'
+          tar -xOzf "$asset" update.sh | grep -q 'REPO="a4531613/Open-Box"'
+          tar -xOzf "$asset" openwrt/luci/htdocs/luci-static/resources/view/openbox/status.js | grep -q "var REPO = 'a4531613/Open-Box';"
+          tar -xOzf "$asset" meta.json | grep -q '"version": "secure-v'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: open-box-secure-${{ matrix.arch }}
+          path: |
+            dist-release/*.tar.gz
+            dist-release/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-release
+          merge-multiple: true
+
+      - name: Verify release files
+        run: |
+          set -eu
+          ls -la dist-release
+          for asset in dist-release/open-box-linux-*.tar.gz; do
+            [ -f "$asset.sha256" ] || { echo "missing checksum for $asset" >&2; exit 1; }
+            (cd dist-release && sha256sum -c "$(basename "$asset").sha256")
+          done
+
+      - name: Generate build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist-release/*.tar.gz'
+
+      - name: Write release notes
+        run: |
+          cat > release-notes.md <<'EOF'
+          ## Security-hardened Open-Box
+
+          This release is built from `a4531613/Open-Box` and includes the LAN-facing security gateway.
+
+          Security defaults:
+          - root-capable original backend is loopback-only
+          - LAN panel binds to the LAN IPv4 address instead of `0.0.0.0`
+          - management password is stored as scrypt hash
+          - repeated bad logins are rate-limited
+          - custom controller proxy targets are blocked
+          - persisted third-party mirror selection is reset to GitHub direct by default
+          - release artifacts have SHA256 files and GitHub build provenance attestation
+
+          Install with the hardened installer from this repository's `main` branch.
+          EOF
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Open-Box ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body_path: release-notes.md
+          fail_on_unmatched_files: true
+          files: |
+            dist-release/*.tar.gz
+            dist-release/*.sha256
