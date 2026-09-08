@@ -49,15 +49,17 @@ jobs:
         working-directory: panel
         run: corepack pnpm install --frozen-lockfile
 
-      # The upstream scripts are intentionally kept close to upstream for easier syncing.
-      # Release artifacts, however, must never update back to liandu2024/Open-Box.
+      # Keep the source tree close to upstream for easier syncing, but every published hardened
+      # artifact must resolve its own updates/version checks back to this fork.
       - name: Bind release artifact to hardened fork
         run: |
           set -eu
           sed -i 's#REPO="liandu2024/Open-Box"#REPO="a4531613/Open-Box"#' scripts/update.sh scripts/install.sh
           sed -i "s#var REPO = 'liandu2024/Open-Box';#var REPO = 'a4531613/Open-Box';#" openwrt/luci/htdocs/luci-static/resources/view/openbox/status.js
+          sed -i 's#https://api.github.com/repos/liandu2024/AnGe-ClashBoard/releases/latest#https://api.github.com/repos/a4531613/Open-Box/releases/latest#' panel/src/api/index.ts
           grep -q 'REPO="a4531613/Open-Box"' scripts/update.sh
           grep -q "var REPO = 'a4531613/Open-Box';" openwrt/luci/htdocs/luci-static/resources/view/openbox/status.js
+          grep -q 'https://api.github.com/repos/a4531613/Open-Box/releases/latest' panel/src/api/index.ts
 
       - name: Build release tarball
         env:
@@ -73,6 +75,7 @@ jobs:
           tar -xOzf "$asset" update.sh | grep -q 'REPO="a4531613/Open-Box"'
           tar -xOzf "$asset" openwrt/luci/htdocs/luci-static/resources/view/openbox/status.js | grep -q "var REPO = 'a4531613/Open-Box';"
           tar -xOzf "$asset" meta.json | grep -q '"version": "secure-v'
+          tar -xOzf "$asset" panel/dist/index.html >/dev/null
 
       - uses: actions/upload-artifact@v4
         with:
@@ -125,6 +128,7 @@ jobs:
           - repeated bad logins are rate-limited
           - custom controller proxy targets are blocked
           - persisted third-party mirror selection is reset to GitHub direct by default
+          - updater, LuCI update checker and UI update checker all point to this hardened fork
           - release artifacts have SHA256 files and GitHub build provenance attestation
 
           Install with the hardened installer from this repository's `main` branch.
