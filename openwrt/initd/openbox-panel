@@ -38,6 +38,14 @@ start_service() {
 	}
 	mkdir -p "$DATA"
 
+	# Hardened builds never silently reuse a third-party download mirror from an older install.
+	# A mirror can still be used explicitly for one update (`update.sh --mirror <prefix>`), but
+	# normal unattended/manual updates return to GitHub direct. Set the environment override only
+	# if the operator intentionally accepts persistent mirror trust.
+	if [ "${OPENBOX_ALLOW_PERSISTED_MIRROR:-0}" != "1" ]; then
+		printf 'direct\n' > "$DATA/channel"
+	fi
+
 	procd_open_instance openbox-panel
 	procd_set_param command "$NODE" "$ENTRY"
 	# The gateway owns the LAN-facing port. The original backend is started by the gateway and
