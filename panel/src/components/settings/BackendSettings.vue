@@ -13,18 +13,10 @@
           <span class="bg-secondary absolute h-2 w-2 animate-ping rounded-full"></span>
           <span class="bg-secondary h-2 w-2 rounded-full"></span>
         </span>
-        <a
-          class="flex cursor-pointer items-center gap-2"
-          :href="
-            isSingBox
-              ? 'https://github.com/sagernet/sing-box'
-              : 'https://github.com/metacubex/mihomo'
-          "
-          target="_blank"
-        >
+        <div class="flex items-center gap-2">
           {{ $t('backend') }}
           <BackendVersion class="text-sm font-normal" />
-        </a>
+        </div>
       </div>
     </div>
     <template v-if="!isSingBox && configs && isVisiblePorts">
