@@ -97,7 +97,10 @@ export const fetchProxyProviderLatencyAPI = (
   return axios.get<{ delay: number }>(
     `/providers/proxies/${encodeURIComponent(providerName)}/${encodeURIComponent(proxyName)}/healthcheck`,
     {
-      timeout: 15000,
+      params: {
+        url,
+        timeout,
+      },
     },
   )
 }
@@ -148,7 +151,7 @@ export const proxyProviderHealthCheckAPI = (name: string) => {
 }
 
 export const fetchRulesAPI = () => {
-  return axios.get<{ rules: Record<string, Rule> }>('/rules')
+  return axios.get<{ rules: Rule[] }>('/rules')
 }
 
 export const toggleRuleDisabledAPI = (data: Record<number, boolean>) => {
